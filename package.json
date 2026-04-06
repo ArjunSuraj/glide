@@ -1,0 +1,22 @@
+{
+  "name": "glide-editor-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "pnpm build:shared && pnpm build:overlay && pnpm build:cli",
+    "build:shared": "pnpm --filter @react-rewrite/shared build",
+    "build:overlay": "pnpm --filter @react-rewrite/overlay build",
+    "build:cli": "pnpm --filter glide-editor build",
+    "dev": "pnpm build:overlay && pnpm --filter glide-editor dev",
+    "typecheck": "pnpm build:shared && pnpm --filter glide-editor exec tsc --noEmit",
+    "test": "pnpm --filter glide-editor test",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.30.0"
+  }
+}

@@ -1,0 +1,1035 @@
+// packages/overlay/src/selection.ts
+//
+// Coordinate space note (infinite canvas):
+// When the canvas transform is active (zoom/pan via CSS transform on a wrapper div),
+// all coordinate APIs used here remain correct without explicit mapping:
+//   - getBoundingClientRect() returns viewport coordinates that already account for
+//     CSS transforms, so highlight rects and label positioning are correct.
+//   - elementFromPoint() / elementsFromPoint() accept viewport coordinates and the
+//     browser resolves hit-testing through CSS transforms automatically.
+//   - The highlight canvas (highlight-canvas.ts) is position:fixed and draws in
+//     viewport space, matching getBoundingClientRect() output.
+//   - The selection label and marquee box are position:fixed, so using clientX/clientY
+//     and rect.left/rect.top (all viewport coords) is correct.
+//   - The area selection (area-selection.ts) compares marquee bounds (viewport coords
+//     from clientX/clientY) against getBoundingClientRect() (viewport coords). Consistent.
+// Therefore, no viewportToPage/pageToViewport mapping is needed in this module.
+//
+import type { ComponentInfo, JSXStructuralPath } from "@react-rewrite/shared";
+import { getShadowRoot, updateComponentDetail } from "./toolbar.js";
+import { isFullPageElement, isValidElement } from "./utils/component-filter.js";
+import { getElementsInArea } from "./utils/area-selection.js";
+import { COLORS, SHADOWS, RADII, TRANSITIONS, FONT_FAMILY } from "./design-tokens.js";
+import { setHoverTarget, setSelectionTarget, setMultiSelectionTargets, clearMultiSelection, isMultiSelectActive, getHandleAtPoint, getSelectionGeometry, setSimilarTargets, clearSimilarTargets, getSimilarCount, type CornerHandle } from "./highlight-canvas.js";
+import { inspect, deselect as deselectProperty, commitAndDeselect, cancel as cancelProperty, hasActiveOverrides, preview, scheduledCommit } from "./properties/property-controller.js";
+import { getPageElementAtPoint, isPanningActive } from "./interaction.js";
+import { tryStartMove, updateMovePosition, endMove } from "./tools/move.js";
+import { getMoveContainingElement, hasMoveForElement } from "./canvas-state.js";
+import { getCachedFilePath, setCachedFilePath } from "./file-discovery-cache.js";
+import { requestFileDiscovery } from "./bridge.js";
+import { isTextEditing } from "./inline-text-edit.js";
+import { findSimilarElements } from "./utils/similar-elements.js";
+import { getAdapter, type ResolvedComponent } from "./adapters/index.js";
+import { send } from "./bridge.js";
+import { showToast } from "./toolbar.js";
+
+async function resolveComponentFromElement(el: HTMLElement): Promise<ResolvedComponent | null> {
+  return getAdapter().resolveComponent(el);
+}
+
+function resolveComponentSync(el: HTMLElement): ResolvedComponent | null {
+  return getAdapter().resolveComponentSync(el);
+}
+
+function buildFallbackSelection(el: HTMLElement): ResolvedComponent {
+  const tagName = el.tagName.toLowerCase();
+  const dataName = el.getAttribute("data-component-name")?.trim();
+  const ariaLabel = el.getAttribute("aria-label")?.trim();
+  const textLabel = el.textContent?.trim();
+  const componentName =
+    dataName ||
+    ariaLabel ||
+    (textLabel ? textLabel.slice(0, 24) : "") ||
+    `<${tagName}>`;
+
+  return {
+    tagName,
+    componentName,
+    filePath: "",
+    lineNumber: 0,
+    columnNumber: 0,
+    stack: [],
+  };
+}
+
+function getCanonicalSelectableElement(clientX: number, clientY: number): HTMLElement | null {
+  const pageEl = getPageElementAtPoint(clientX, clientY);
+  if (!pageEl) return null;
+  const moveEntry = getMoveContainingElement(pageEl);
+  return moveEntry?.element ?? pageEl;
+}
+
+
+let currentSelection: ComponentInfo | null = null;
+let selectedElement: HTMLElement | null = null;
+let isActive = false;
+let listenersAttached = false;
+
+// Multi-selection state
+interface MultiSelectEntry {
+  element: HTMLElement;
+  info: ComponentInfo;
+}
+let multiSelected: Map<HTMLElement, MultiSelectEntry> = new Map();
+
+// Overlay elements
+let selectionLabel: HTMLDivElement | null = null;
+let marqueeBox: HTMLDivElement | null = null;
+
+// Interaction state machine
+type InteractionMode = "idle" | "pending" | "marquee" | "pending-move" | "move-drag" | "reorder-drag" | "resize-drag";
+let mode: InteractionMode = "idle";
+let mouseDownPos: { x: number; y: number } | null = null;
+let mouseDownElement: HTMLElement | null = null;
+
+// Similar-class highlight state
+let similarEnabled = true;
+let similarElements: HTMLElement[] = [];
+let onSimilarCountChange: ((count: number) => void) | null = null;
+
+// Resize drag state
+let resizeDragCorner: CornerHandle | null = null;
+let resizeInitialRect: { x: number; y: number; w: number; h: number } | null = null;
+let resizeInitialWidth = 0;
+let resizeInitialHeight = 0;
+let multiResizeInitials: Array<{ element: HTMLElement; width: number; height: number }> = [];
+
+// Shift+click tracking
+let isShiftClick = false;
+
+
+// Drag callbacks — set by drag.ts via setDragCallbacks
+let onDragStartCallback: ((e: MouseEvent, el: HTMLElement, selection: ComponentInfo) => void) | null = null;
+let onDragMoveCallback: ((e: MouseEvent) => void) | null = null;
+let onDragEndCallback: ((e: MouseEvent) => void) | null = null;
+
+const OVERLAY_STYLES = `
+  .selection-label {
+    position: fixed;
+    pointer-events: none;
+    background: ${COLORS.bgPrimary};
+    border: 1px solid ${COLORS.border};
+    box-shadow: ${SHADOWS.sm};
+    border-radius: ${RADII.sm};
+    padding: 4px 8px;
+    z-index: 2147483646;
+    font-family: ${FONT_FAMILY};
+    white-space: nowrap;
+    display: none;
+    opacity: 0;
+    transition: opacity ${TRANSITIONS.medium};
+  }
+  .selection-label.visible {
+    opacity: 1;
+  }
+  .selection-label .comp-name {
+    color: ${COLORS.textPrimary};
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .selection-label .comp-path {
+    color: ${COLORS.textSecondary};
+    font-size: 11px;
+    margin-left: 8px;
+  }
+  .selection-label .loading-dots {
+    color: ${COLORS.textTertiary};
+    font-size: 12px;
+  }
+  @keyframes dotPulse {
+    0%, 80%, 100% { opacity: 0.2; }
+    40% { opacity: 1; }
+  }
+  .selection-label .loading-dots span {
+    animation: dotPulse 1.4s infinite;
+  }
+  .selection-label .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .selection-label .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+  .marquee-box {
+    position: fixed;
+    border: 1px solid ${COLORS.accent};
+    background: ${COLORS.accentSoft};
+    border-radius: 2px;
+    z-index: 2147483646;
+    display: none;
+    pointer-events: none;
+  }
+`;
+
+export function setDragCallbacks(callbacks: {
+  onStart: (e: MouseEvent, el: HTMLElement, selection: ComponentInfo) => void;
+  onMove: (e: MouseEvent) => void;
+  onEnd: (e: MouseEvent) => void;
+}): void {
+  onDragStartCallback = callbacks.onStart;
+  onDragMoveCallback = callbacks.onMove;
+  onDragEndCallback = callbacks.onEnd;
+}
+
+export function initSelection(): void {
+  const shadowRoot = getShadowRoot();
+  if (!shadowRoot) return;
+
+  const style = document.createElement("style");
+  style.textContent = OVERLAY_STYLES;
+  shadowRoot.appendChild(style);
+
+  selectionLabel = document.createElement("div");
+  selectionLabel.className = "selection-label";
+  shadowRoot.appendChild(selectionLabel);
+
+  marqueeBox = document.createElement("div");
+  marqueeBox.className = "marquee-box";
+  shadowRoot.appendChild(marqueeBox);
+
+  isActive = true;
+
+  // Single set of event listeners — selection.ts owns all mouse dispatch
+  document.addEventListener("mousedown", handleMouseDown, true);
+  document.addEventListener("mousemove", handleMouseMove, true);
+  document.addEventListener("mouseup", handleMouseUp, true);
+  document.addEventListener("keydown", handleKeyDown, true);
+  document.addEventListener("click", handleClick, true);
+  document.addEventListener("scroll", updateSelectionPosition, true);
+  window.addEventListener("resize", updateSelectionPosition);
+  listenersAttached = true;
+}
+
+function handleMouseDown(e: MouseEvent): void {
+  if (!isActive) return;
+  if (isTextEditing()) return;
+  if (isPanningActive()) return;
+
+  // Cmd+click (Mac) or Ctrl+click (Win/Linux) → let browser handle (follow links, etc.)
+  if (e.metaKey || e.ctrlKey) return;
+
+  // Ignore clicks on the overlay's own UI (sidebar, toolbar, etc.)
+  // composedPath() pierces Shadow DOM boundaries
+  const path = e.composedPath();
+  if (path.some((el) => el instanceof HTMLElement && el.id === "glide-root")) return;
+
+  const el = getCanonicalSelectableElement(e.clientX, e.clientY);
+
+  // Check if clicking on a resize corner handle (works for both single and multi-select)
+  const hasSelection = currentSelection || multiSelected.size > 0;
+  if (hasSelection) {
+    const handle = getHandleAtPoint(e.clientX, e.clientY);
+    if (handle) {
+      e.preventDefault();
+      e.stopPropagation();
+      const geo = getSelectionGeometry();
+      resizeDragCorner = handle;
+      resizeInitialRect = geo ? { ...geo } : null;
+
+      if (multiSelected.size > 0) {
+        // Multi-select resize: store initial sizes for all selected elements
+        multiResizeInitials = [];
+        for (const [element] of multiSelected) {
+          const computed = getComputedStyle(element);
+          multiResizeInitials.push({
+            element,
+            width: parseFloat(computed.width) || element.offsetWidth,
+            height: parseFloat(computed.height) || element.offsetHeight,
+          });
+        }
+        resizeInitialWidth = 0;
+        resizeInitialHeight = 0;
+      } else if (selectedElement) {
+        const computed = getComputedStyle(selectedElement);
+        resizeInitialWidth = parseFloat(computed.width) || selectedElement.offsetWidth;
+        resizeInitialHeight = parseFloat(computed.height) || selectedElement.offsetHeight;
+        multiResizeInitials = [];
+      }
+
+      mouseDownPos = { x: e.clientX, y: e.clientY };
+      mode = "resize-drag";
+      return;
+    }
+
+  }
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (!el || !isValidElement(el)) {
+    // Clicking on empty/invalid area → save changes and deselect everything
+    if (currentSelection || multiSelected.size > 0) {
+      commitAndDeselect();
+      currentSelection = null;
+      selectedElement = null;
+      clearMultiSelectState();
+      setSelectionTarget(null);
+      if (selectionLabel) {
+        selectionLabel.classList.remove("visible");
+        selectionLabel.style.display = "none";
+      }
+      updateComponentDetail(null);
+    }
+    return;
+  }
+
+  mouseDownPos = { x: e.clientX, y: e.clientY };
+  mouseDownElement = el;
+  isShiftClick = e.shiftKey;
+
+  // If clicking on an element that already has a move entry → start re-drag immediately
+  if (hasMoveForElement(el)) {
+    if (tryStartMove(e.clientX, e.clientY, el)) {
+      mode = "move-drag";
+      return;
+    }
+  }
+
+  // If clicking on the currently selected element (not shift-click) → prepare for possible move-drag
+  if (!isShiftClick && selectedElement && el === selectedElement) {
+    mode = "pending-move";
+    return;
+  }
+
+  // Clicking unselected element → pending (may become marquee or click-to-select)
+  mode = "pending";
+}
+
+function handleMouseMove(e: MouseEvent): void {
+  if (!isActive) return;
+  if (isTextEditing()) return;
+  if (isPanningActive()) return;
+
+  // Resize drag — compute new width/height from mouse delta
+  if (mode === "resize-drag" && resizeDragCorner && mouseDownPos && resizeInitialRect) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const dx = e.clientX - mouseDownPos.x;
+    const dy = e.clientY - mouseDownPos.y;
+
+    if (multiResizeInitials.length > 0) {
+      // Multi-select resize: apply same delta to all elements
+      for (const entry of multiResizeInitials) {
+        let newW = entry.width;
+        let newH = entry.height;
+        if (resizeDragCorner === "tr" || resizeDragCorner === "br") {
+          newW = Math.max(10, entry.width + dx);
+        } else {
+          newW = Math.max(10, entry.width - dx);
+        }
+        if (resizeDragCorner === "bl" || resizeDragCorner === "br") {
+          newH = Math.max(10, entry.height + dy);
+        } else {
+          newH = Math.max(10, entry.height - dy);
+        }
+        entry.element.style.width = `${Math.round(newW)}px`;
+        entry.element.style.height = `${Math.round(newH)}px`;
+      }
+      updateMultiSelectionHighlights();
+    } else {
+      // Single-select resize
+      let newWidth = resizeInitialWidth;
+      let newHeight = resizeInitialHeight;
+
+      if (resizeDragCorner === "tr" || resizeDragCorner === "br") {
+        newWidth = Math.max(10, resizeInitialWidth + dx);
+      } else {
+        newWidth = Math.max(10, resizeInitialWidth - dx);
+      }
+      if (resizeDragCorner === "bl" || resizeDragCorner === "br") {
+        newHeight = Math.max(10, resizeInitialHeight + dy);
+      } else {
+        newHeight = Math.max(10, resizeInitialHeight - dy);
+      }
+
+      newWidth = Math.round(newWidth);
+      newHeight = Math.round(newHeight);
+
+      preview("width", `${newWidth}px`);
+      preview("height", `${newHeight}px`);
+      updateSelectionPosition();
+    }
+    return;
+  }
+
+  // Pending-move → move-drag or reorder-drag (drag threshold for selected element)
+  if (mode === "pending-move" && mouseDownPos) {
+    const dx = Math.abs(e.clientX - mouseDownPos.x);
+    const dy = Math.abs(e.clientY - mouseDownPos.y);
+    if (dx > 4 || dy > 4) {
+      // Alt+drag → reorder mode (rearrange siblings in source)
+      if (e.altKey && onDragStartCallback && mouseDownElement && currentSelection) {
+        onDragStartCallback(e, mouseDownElement, currentSelection);
+        mode = "reorder-drag";
+        return;
+      }
+      // Normal drag → visual move
+      if (mouseDownElement && tryStartMove(mouseDownPos.x, mouseDownPos.y, mouseDownElement)) {
+        mode = "move-drag";
+        updateMovePosition(e.clientX, e.clientY);
+      } else {
+        mode = "marquee";
+      }
+    }
+    return;
+  }
+
+  // Active reorder-drag — forward to drag handler
+  if (mode === "reorder-drag") {
+    e.preventDefault();
+    e.stopPropagation();
+    if (onDragMoveCallback) onDragMoveCallback(e);
+    return;
+  }
+
+  // Active move-drag — update position
+  if (mode === "move-drag") {
+    updateMovePosition(e.clientX, e.clientY);
+    return;
+  }
+
+  if (mode === "pending" && mouseDownPos) {
+    const dx = Math.abs(e.clientX - mouseDownPos.x);
+    const dy = Math.abs(e.clientY - mouseDownPos.y);
+    if (dx > 10 || dy > 10) {
+      mode = "marquee";
+    }
+  }
+
+  if (mode === "marquee" && mouseDownPos && marqueeBox) {
+    const x = Math.min(e.clientX, mouseDownPos.x);
+    const y = Math.min(e.clientY, mouseDownPos.y);
+    const w = Math.abs(e.clientX - mouseDownPos.x);
+    const h = Math.abs(e.clientY - mouseDownPos.y);
+    marqueeBox.style.display = "block";
+    marqueeBox.style.left = `${x}px`;
+    marqueeBox.style.top = `${y}px`;
+    marqueeBox.style.width = `${w}px`;
+    marqueeBox.style.height = `${h}px`;
+    return;
+  }
+
+  // Hover highlight (only when idle — no mouse button down)
+  if (mode === "idle") {
+    // Show resize cursor when hovering over a corner handle (single or multi-select)
+    const hasAnySelection = (currentSelection && selectedElement) || multiSelected.size > 0;
+    if (hasAnySelection) {
+      const handle = getHandleAtPoint(e.clientX, e.clientY);
+      if (handle) {
+        document.body.style.cursor = (handle === "tl" || handle === "br") ? "nwse-resize" : "nesw-resize";
+        return;
+      } else {
+        document.body.style.cursor = "";
+      }
+    }
+
+    const el = getCanonicalSelectableElement(e.clientX, e.clientY);
+    if (!el || !isValidElement(el)) {
+      setHoverTarget(null);
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const br = parseFloat(getComputedStyle(el).borderRadius) || 4;
+    setHoverTarget(rect, br + 2);
+  }
+}
+
+function handleMouseUp(e: MouseEvent): void {
+  if (!isActive) return;
+  if (isTextEditing()) return;
+  if (isPanningActive()) return;
+
+  const prevMode = mode;
+  mode = "idle";
+
+  // Commit resize
+  if (prevMode === "resize-drag") {
+    document.body.style.cursor = "";
+    resizeDragCorner = null;
+    resizeInitialRect = null;
+    mouseDownPos = null;
+    if (multiResizeInitials.length > 0) {
+      multiResizeInitials = [];
+    } else {
+      scheduledCommit();
+    }
+    return;
+  }
+
+  // Complete reorder-drag
+  if (prevMode === "reorder-drag") {
+    if (onDragEndCallback) onDragEndCallback(e);
+    mouseDownPos = null;
+    mouseDownElement = null;
+    return;
+  }
+
+  // Complete move-drag
+  if (prevMode === "move-drag") {
+    const movedEl = endMove();
+    if (movedEl) selectElementForMove(movedEl);
+    mouseDownPos = null;
+    mouseDownElement = null;
+    return;
+  }
+
+  // Pending-move that didn't exceed threshold → treat as click (re-select)
+  if (prevMode === "pending-move") {
+    // Already selected — no action needed
+    mouseDownPos = null;
+    mouseDownElement = null;
+    return;
+  }
+
+  if (prevMode === "marquee" && mouseDownPos) {
+    if (marqueeBox) marqueeBox.style.display = "none";
+    performMarqueeSelect(
+      Math.min(e.clientX, mouseDownPos.x),
+      Math.min(e.clientY, mouseDownPos.y),
+      Math.max(e.clientX, mouseDownPos.x),
+      Math.max(e.clientY, mouseDownPos.y)
+    );
+    mouseDownPos = null;
+    mouseDownElement = null;
+    isShiftClick = false;
+    return;
+  }
+
+  // prevMode was "pending" — treat as a click
+  if (mouseDownElement) {
+    if (isShiftClick) {
+      toggleMultiSelect(mouseDownElement);
+    } else {
+      // Regular click: clear multi-select, do single select
+      clearMultiSelectState();
+      selectElement(mouseDownElement);
+    }
+  }
+  mouseDownPos = null;
+  mouseDownElement = null;
+  isShiftClick = false;
+}
+
+export async function selectElement(el: HTMLElement, options?: { skipSidebar?: boolean }): Promise<void> {
+  try {
+    const displayRect = el.getBoundingClientRect();
+
+    // Show selection overlay with loading dots immediately, before async resolve
+    selectedElement = el;
+    showSelectionOverlay(displayRect, null);
+    hideHoverOverlay();
+
+    const resolved = (await resolveComponentFromElement(el)) ?? buildFallbackSelection(el);
+
+    // Layer 2: grep-based discovery when filePath is empty
+    if (!resolved.filePath && resolved.componentName) {
+      const cached = getCachedFilePath(resolved.componentName);
+      if (cached === undefined) {
+        // Not looked up yet — ask CLI
+        const discovered = await requestFileDiscovery(resolved.componentName);
+        setCachedFilePath(resolved.componentName, discovered);
+        if (discovered) {
+          resolved.filePath = discovered;
+          if (resolved.stack) {
+            for (const frame of resolved.stack) {
+              if (frame.componentName === resolved.componentName && !frame.filePath) {
+                frame.filePath = discovered;
+              }
+            }
+          }
+        }
+      } else if (cached) {
+        resolved.filePath = cached;
+        if (resolved.stack) {
+          for (const frame of resolved.stack) {
+            if (frame.componentName === resolved.componentName && !frame.filePath) {
+              frame.filePath = cached;
+            }
+          }
+        }
+      }
+    }
+
+    console.log("[Glide] selectElement:", el.tagName, "→", resolved.componentName, resolved.filePath, "stack:", resolved.stack?.map(s => s.componentName));
+
+    currentSelection = {
+      tagName: resolved.tagName,
+      componentName: resolved.componentName,
+      filePath: resolved.filePath,
+      lineNumber: resolved.lineNumber,
+      columnNumber: resolved.columnNumber,
+      stack: resolved.stack,
+      boundingRect: {
+        top: displayRect.top,
+        left: displayRect.left,
+        width: displayRect.width,
+        height: displayRect.height,
+      },
+      jsxPath: resolved.jsxPath,
+    };
+
+    if (selectionLabel) {
+      const pathText = resolved.filePath ? `${resolved.filePath}:${resolved.lineNumber}` : "";
+      selectionLabel.innerHTML = `<span class="comp-name">${resolved.componentName}</span>${pathText ? `<span class="comp-path">${pathText}</span>` : ""}`;
+    }
+
+    // Notify property controller of new selection (opens sidebar) — skip in move tool mode
+    if (!options?.skipSidebar) {
+      inspect(el, currentSelection);
+    }
+
+    // Update action bar component detail
+    updateComponentDetail({
+      tagName: resolved.tagName,
+      componentName: resolved.componentName,
+      filePath: resolved.filePath,
+      lineNumber: resolved.lineNumber,
+    });
+
+    updateSimilarHighlights();
+  } catch (err) {
+    console.error("[Glide] selectElement error:", err);
+  }
+}
+
+function performMarqueeSelect(x1: number, y1: number, x2: number, y2: number): void {
+  const elements = getElementsInArea({
+    x: x1, y: y1,
+    width: x2 - x1, height: y2 - y1,
+  });
+
+  if (elements.length === 0) return;
+
+  // Clear single selection when marquee selects
+  deselectProperty();
+  currentSelection = null;
+  selectedElement = null;
+  setSelectionTarget(null);
+  if (selectionLabel) {
+    selectionLabel.classList.remove("visible");
+    selectionLabel.style.display = "none";
+  }
+
+  // Resolve each element and add to multi-select
+  multiSelected.clear();
+  for (const el of elements.slice(0, 50)) {
+    const resolved = resolveComponentSync(el);
+    if (!resolved) continue;
+
+    const rect = el.getBoundingClientRect();
+    const info: ComponentInfo = {
+      tagName: resolved.tagName,
+      componentName: resolved.componentName,
+      filePath: resolved.filePath,
+      lineNumber: resolved.lineNumber,
+      columnNumber: resolved.columnNumber,
+      stack: resolved.stack,
+      boundingRect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
+    };
+    multiSelected.set(el, { element: el, info });
+  }
+
+  if (multiSelected.size === 0) return;
+
+  // If only one element selected by marquee, convert to single select
+  if (multiSelected.size === 1) {
+    const [el, entry] = [...multiSelected.entries()][0];
+    multiSelected.clear();
+    selectedElement = el;
+    currentSelection = entry.info;
+    const rect = el.getBoundingClientRect();
+    showSelectionOverlay(rect, currentSelection);
+    if (selectionLabel) {
+      const pathText = entry.info.filePath ? `${entry.info.filePath}:${entry.info.lineNumber}` : "";
+      selectionLabel.innerHTML = `<span class="comp-name">${entry.info.componentName}</span>${pathText ? `<span class="comp-path">${pathText}</span>` : ""}`;
+    }
+    inspect(el, currentSelection);
+    updateComponentDetail({
+      tagName: entry.info.tagName,
+      componentName: entry.info.componentName,
+      filePath: entry.info.filePath,
+      lineNumber: entry.info.lineNumber,
+    });
+    return;
+  }
+
+  // Multiple elements → update highlights + show count label
+  updateMultiSelectionHighlights();
+  updateComponentDetail(null); // No single-element detail for multi-select
+  if (selectionLabel) {
+    selectionLabel.innerHTML = `<span class="comp-name">${multiSelected.size} elements selected</span>`;
+    selectionLabel.style.display = "block";
+    selectionLabel.style.left = `${x1}px`;
+    selectionLabel.style.top = `${Math.max(0, y1 - 36)}px`;
+    selectionLabel.style.right = "auto";
+    requestAnimationFrame(() => selectionLabel?.classList.add("visible"));
+  }
+}
+
+
+/** Shift+click: toggle an element in/out of multi-select */
+function toggleMultiSelect(el: HTMLElement): void {
+  if (multiSelected.has(el)) {
+    // Remove from multi-select
+    multiSelected.delete(el);
+    if (multiSelected.size === 1) {
+      // Collapse back to single select
+      const [remainEl, entry] = [...multiSelected.entries()][0];
+      multiSelected.clear();
+      clearMultiSelection();
+      selectedElement = remainEl;
+      currentSelection = entry.info;
+      const rect = remainEl.getBoundingClientRect();
+      showSelectionOverlay(rect, currentSelection);
+      inspect(remainEl, currentSelection);
+      if (selectionLabel) {
+        const pathText = entry.info.filePath ? `${entry.info.filePath}:${entry.info.lineNumber}` : "";
+        selectionLabel.innerHTML = `<span class="comp-name">${entry.info.componentName}</span>${pathText ? `<span class="comp-path">${pathText}</span>` : ""}`;
+      }
+      updateComponentDetail({
+        tagName: entry.info.tagName,
+        componentName: entry.info.componentName,
+        filePath: entry.info.filePath,
+        lineNumber: entry.info.lineNumber,
+      });
+    } else if (multiSelected.size === 0) {
+      clearMultiSelection();
+      clearSelection();
+    } else {
+      updateMultiSelectionHighlights();
+      if (selectionLabel) {
+        selectionLabel.innerHTML = `<span class="comp-name">${multiSelected.size} elements selected</span>`;
+      }
+    }
+    return;
+  }
+
+  // Add to multi-select
+  const resolved = resolveComponentSync(el);
+  if (!resolved) return;
+
+  // If there's a current single selection, promote it to multi-select first
+  if (currentSelection && selectedElement && multiSelected.size === 0) {
+    multiSelected.set(selectedElement, { element: selectedElement, info: currentSelection });
+    deselectProperty();
+    currentSelection = null;
+    selectedElement = null;
+    setSelectionTarget(null);
+  }
+
+  const rect = el.getBoundingClientRect();
+  const info: ComponentInfo = {
+    tagName: resolved.tagName,
+    componentName: resolved.componentName,
+    filePath: resolved.filePath,
+    lineNumber: resolved.lineNumber,
+    columnNumber: resolved.columnNumber,
+    stack: resolved.stack,
+    boundingRect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
+  };
+  multiSelected.set(el, { element: el, info });
+
+  updateMultiSelectionHighlights();
+  updateComponentDetail(null);
+  if (selectionLabel) {
+    selectionLabel.innerHTML = `<span class="comp-name">${multiSelected.size} elements selected</span>`;
+    selectionLabel.style.display = "block";
+    requestAnimationFrame(() => selectionLabel?.classList.add("visible"));
+  }
+}
+
+/** Clear multi-select state and highlight canvas */
+function clearMultiSelectState(): void {
+  multiSelected.clear();
+  clearMultiSelection();
+}
+
+/** Refresh highlight-canvas multi-selection targets from current multiSelected state */
+function updateMultiSelectionHighlights(): void {
+  if (multiSelected.size === 0) {
+    clearMultiSelection();
+    return;
+  }
+  const targets: Array<{ rect: DOMRect; borderRadius: number }> = [];
+  for (const [element] of multiSelected) {
+    const rect = element.getBoundingClientRect();
+    const br = parseFloat(getComputedStyle(element).borderRadius) || 4;
+    targets.push({ rect, borderRadius: br + 2 });
+  }
+  setMultiSelectionTargets(targets);
+}
+
+function handleClick(e: MouseEvent): void {
+  if (!isActive) return;
+  if (isTextEditing()) return;
+  // Ctrl/Cmd+click → let browser follow links normally
+  if (e.metaKey || e.ctrlKey) return;
+  const path = e.composedPath();
+  if (path.some((el) => el instanceof HTMLElement && el.id === "glide-root")) return;
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function handleKeyDown(e: KeyboardEvent): void {
+  if (!isActive) return;
+
+  // Ctrl/Cmd+D → duplicate selected element
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
+    if (currentSelection && currentSelection.filePath && currentSelection.lineNumber > 0) {
+      e.preventDefault();
+      send({
+        type: "commitBatch",
+        operations: [{
+          op: "duplicate",
+          file: currentSelection.filePath,
+          line: currentSelection.lineNumber,
+          col: currentSelection.columnNumber,
+          componentName: currentSelection.componentName,
+          tagName: currentSelection.tagName,
+          className: selectedElement?.className || undefined,
+        }],
+      });
+      showToast("Duplicating element...");
+    }
+    return;
+  }
+
+  if (e.key === "Escape") {
+    // Clear multi-select first
+    if (multiSelected.size > 0) {
+      clearMultiSelectState();
+      if (selectionLabel) {
+        selectionLabel.classList.remove("visible");
+        selectionLabel.style.display = "none";
+      }
+      updateComponentDetail(null);
+      e.preventDefault();
+      return;
+    }
+    if (currentSelection) {
+      // Before clearing selection on Escape, check if property controller has active overrides
+      if (hasActiveOverrides()) {
+        cancelProperty();
+        e.preventDefault();
+        return; // Don't clear selection, just cancel the preview
+      }
+      clearSelection();
+      e.preventDefault();
+    }
+  }
+}
+
+function showSelectionOverlay(rect: DOMRect, _info: any): void {
+  if (selectedElement) {
+    const br = parseFloat(getComputedStyle(selectedElement).borderRadius) || 4;
+    setSelectionTarget(rect, br + 2);
+  }
+
+  if (selectionLabel) {
+    const labelHeight = 28;
+    const gap = 8;
+    let top = rect.top - labelHeight - gap;
+    let left = rect.left;
+
+    if (top < 0) {
+      top = rect.bottom + gap;
+    }
+
+    selectionLabel.style.left = `${left}px`;
+    selectionLabel.style.top = `${top}px`;
+    selectionLabel.style.display = "block";
+    selectionLabel.style.right = "auto";
+
+    selectionLabel.innerHTML = `<span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>`;
+    requestAnimationFrame(() => selectionLabel?.classList.add("visible"));
+
+    requestAnimationFrame(() => {
+      if (!selectionLabel) return;
+      const labelRect = selectionLabel.getBoundingClientRect();
+      if (labelRect.right > window.innerWidth - 8) {
+        selectionLabel.style.left = "auto";
+        selectionLabel.style.right = "8px";
+      }
+    });
+  }
+}
+
+/** Update selection highlight + label to track the selected element on scroll/resize */
+function updateSelectionPosition(): void {
+  // Handle multi-select position update
+  if (multiSelected.size > 0) {
+    updateMultiSelectionHighlights();
+    return;
+  }
+
+  if (!selectedElement || !currentSelection) return;
+  const rect = selectedElement.getBoundingClientRect();
+  const br = parseFloat(getComputedStyle(selectedElement).borderRadius) || 4;
+  setSelectionTarget(rect, br + 2);
+
+  // Reposition similar highlights on scroll/resize
+  updateSimilarHighlightRects();
+
+  // Reposition label
+  if (selectionLabel && selectionLabel.style.display !== "none") {
+    const labelHeight = 28;
+    const gap = 8;
+    let top = rect.top - labelHeight - gap;
+    if (top < 0) top = rect.bottom + gap;
+    selectionLabel.style.left = `${rect.left}px`;
+    selectionLabel.style.top = `${top}px`;
+    selectionLabel.style.right = "auto";
+
+    const labelRect = selectionLabel.getBoundingClientRect();
+    if (labelRect.right > window.innerWidth - 8) {
+      selectionLabel.style.left = "auto";
+      selectionLabel.style.right = "8px";
+    }
+  }
+}
+
+function hideHoverOverlay(): void {
+  setHoverTarget(null);
+}
+
+export function clearSelection(): void {
+  deselectProperty();
+  currentSelection = null;
+  selectedElement = null;
+  resizeDragCorner = null;
+  resizeInitialRect = null;
+  multiResizeInitials = [];
+  clearMultiSelectState();
+  document.body.style.cursor = "";
+  setSelectionTarget(null);
+  clearSimilarHighlights();
+  if (selectionLabel) {
+    selectionLabel.classList.remove("visible");
+    selectionLabel.style.display = "none";
+  }
+  updateComponentDetail(null);
+}
+
+export function getSelection(): ComponentInfo | null {
+  return currentSelection;
+}
+
+export function deactivateSelection(): void {
+  isActive = false;
+  document.removeEventListener("mousedown", handleMouseDown, true);
+  document.removeEventListener("mousemove", handleMouseMove, true);
+  document.removeEventListener("mouseup", handleMouseUp, true);
+  document.removeEventListener("keydown", handleKeyDown, true);
+  document.removeEventListener("click", handleClick, true);
+  document.removeEventListener("scroll", updateSelectionPosition, true);
+  window.removeEventListener("resize", updateSelectionPosition);
+  listenersAttached = false;
+  selectionLabel?.remove();
+  selectionLabel = null;
+}
+
+/**
+ * Enable/disable Phase 1 selection handlers.
+ * setEnabled(false) removes capture-phase listeners so the interaction layer can receive events.
+ * setEnabled(true) re-attaches them for Pointer mode.
+ * Different from deactivateSelection() which is a permanent teardown.
+ */
+export function setEnabled(enabled: boolean): void {
+  if (enabled && !listenersAttached) {
+    document.addEventListener("mousedown", handleMouseDown, true);
+    document.addEventListener("mousemove", handleMouseMove, true);
+    document.addEventListener("mouseup", handleMouseUp, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    document.addEventListener("click", handleClick, true);
+    document.addEventListener("scroll", updateSelectionPosition, true);
+    window.addEventListener("resize", updateSelectionPosition);
+    listenersAttached = true;
+    isActive = true;
+  } else if (!enabled && listenersAttached) {
+    document.removeEventListener("mousedown", handleMouseDown, true);
+    document.removeEventListener("mousemove", handleMouseMove, true);
+    document.removeEventListener("mouseup", handleMouseUp, true);
+    document.removeEventListener("keydown", handleKeyDown, true);
+    document.removeEventListener("click", handleClick, true);
+    document.removeEventListener("scroll", updateSelectionPosition, true);
+    window.removeEventListener("resize", updateSelectionPosition);
+    listenersAttached = false;
+    isActive = false;
+  }
+}
+
+export function getSelectedElement(): HTMLElement | null {
+  return selectedElement ?? null;
+}
+
+/** Select an element with highlight but without opening property sidebar (for move tool) */
+export async function selectElementForMove(el: HTMLElement): Promise<void> {
+  await selectElement(el, { skipSidebar: true });
+}
+
+// ─── Similar-class highlights ────────────────────────────
+
+function updateSimilarHighlights(): void {
+  if (!similarEnabled || !selectedElement) {
+    clearSimilarHighlights();
+    return;
+  }
+  similarElements = findSimilarElements(selectedElement);
+  if (similarElements.length === 0) {
+    clearSimilarTargets();
+  } else {
+    const targets = similarElements.map(el => {
+      const rect = el.getBoundingClientRect();
+      const br = parseFloat(getComputedStyle(el).borderRadius) || 4;
+      return { rect, borderRadius: br + 2 };
+    });
+    setSimilarTargets(targets);
+  }
+  onSimilarCountChange?.(similarElements.length);
+}
+
+function updateSimilarHighlightRects(): void {
+  if (similarElements.length === 0) return;
+  const targets = similarElements
+    .filter(el => document.contains(el))
+    .map(el => {
+      const rect = el.getBoundingClientRect();
+      const br = parseFloat(getComputedStyle(el).borderRadius) || 4;
+      return { rect, borderRadius: br + 2 };
+    });
+  if (targets.length > 0) {
+    setSimilarTargets(targets);
+  } else {
+    clearSimilarTargets();
+  }
+}
+
+function clearSimilarHighlights(): void {
+  similarElements = [];
+  clearSimilarTargets();
+  onSimilarCountChange?.(0);
+}
+
+export function toggleSimilarHighlights(): boolean {
+  similarEnabled = !similarEnabled;
+  if (similarEnabled && selectedElement) {
+    updateSimilarHighlights();
+  } else {
+    clearSimilarHighlights();
+  }
+  return similarEnabled;
+}
+
+export function isSimilarEnabled(): boolean {
+  return similarEnabled;
+}
+
+export function setOnSimilarCountChange(fn: (count: number) => void): void {
+  onSimilarCountChange = fn;
+}

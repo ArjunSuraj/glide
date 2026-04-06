@@ -1,0 +1,17 @@
+{
+  "name": "@react-rewrite/overlay",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "bippy": "^0.5.32"
+  },
+  "devDependencies": {
+    "@react-rewrite/shared": "workspace:*",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
