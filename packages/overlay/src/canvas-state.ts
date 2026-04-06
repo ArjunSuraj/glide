@@ -155,6 +155,8 @@ export function addAnnotation(ann: Annotation): void {
 
 /** DOM hints for text edit annotations — used by buildBatchOperations for fuzzy resolution. */
 const textEditDomHints = new Map<string, { tagName: string; className?: string; parentTagName?: string; parentClassName?: string }>();
+/** Call site info for text edits — used for disambiguation when multiple instances share the same prop value. */
+const textEditCallSites = new Map<string, { line?: number; col?: number }>();
 
 export function addTextEditAnnotation(
   ann: TextEditAnnotation,
@@ -165,6 +167,9 @@ export function addTextEditAnnotation(
 ): void {
   annotations.push(ann);
   if (domHints) textEditDomHints.set(ann.id, domHints);
+  if (elementIdentity.callSiteLine) {
+    textEditCallSites.set(ann.id, { line: elementIdentity.callSiteLine, col: elementIdentity.callSiteCol });
+  }
   redoStack.length = 0;
   const action: TextEditRestoreRuntime = {
     type: "textEditRestore",
@@ -475,6 +480,7 @@ function clearCanvasState(revert: boolean): void {
   pendingPropertyOps = [];
   pendingReorderOps = [];
   textEditDomHints.clear();
+  textEditCallSites.clear();
   originalsHidden = true;
   canvasScale = 1;
   canvasOffsetX = 0;
@@ -666,6 +672,7 @@ export function buildBatchOperations(): BatchOperation[] {
       const textAnn = ann as TextEditAnnotation;
       if (textAnn.filePath) {
         const hints = textEditDomHints.get(textAnn.id);
+        const callSite = textEditCallSites.get(textAnn.id);
         ops.push({
           op: "updateText",
           file: textAnn.filePath,
@@ -676,6 +683,8 @@ export function buildBatchOperations(): BatchOperation[] {
           className: hints?.className,
           parentTagName: hints?.parentTagName,
           parentClassName: hints?.parentClassName,
+          callSiteLine: callSite?.line,
+          callSiteCol: callSite?.col,
           originalText: textAnn.originalText,
           newText: textAnn.newText,
           cursorOffset: textAnn.cursorOffset,

@@ -74,6 +74,8 @@ export type BatchOperation =
       fileMtime?: number;
       fileSize?: number;
       jsxPath?: JSXStructuralPath;
+      callSiteLine?: number;
+      callSiteCol?: number;
       originalText: string;
       newText: string;
       cursorOffset?: number;
@@ -343,6 +345,8 @@ export interface ElementIdentity {
   columnNumber: number;
   tagName: string;
   jsxPath?: JSXStructuralPath;
+  callSiteLine?: number;
+  callSiteCol?: number;
 }
 
 export type AppFramework = "react" | "vue" | "angular";

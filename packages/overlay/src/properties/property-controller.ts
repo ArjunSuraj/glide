@@ -12,6 +12,7 @@ import { showToast } from "../toolbar.js";
 import type { PropertyControl } from "./controls/types.js";
 import { addPendingPropertyOperation, pushUndoAction, type PropertyChangeRuntime } from "../canvas-state.js";
 import { dismissOnboarding } from "../onboarding.js";
+import { findSimilarElements } from "../utils/similar-elements.js";
 import { getFiberFromHostInstance, isCompositeFiber, getDisplayName } from "bippy";
 import { getOwnerStack } from "bippy/source";
 import { resolveFrameFilePath } from "../utils/source-resolve.js";
@@ -781,6 +782,15 @@ export function inspect(element: HTMLElement, info: ComponentInfo): void {
     sidebar.showWarning("Source file couldn't be resolved for this element", "Dismiss", () => sidebar.clearWarning());
   } else {
     sidebar.clearWarning();
+    // Check if this is a shared component by looking for similar elements (same classes)
+    const similarCount = findSimilarElements(element).length;
+    if (similarCount > 0) {
+      sidebar.showWarning(
+        `Shared component — ${similarCount + 1} instances. Changes affect all.`,
+        "OK",
+        () => sidebar.clearWarning(),
+      );
+    }
   }
 }
 

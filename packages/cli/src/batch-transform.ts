@@ -525,7 +525,9 @@ function applyOp(j: any, root: any, rop: ResolvedOp, source: string): string | u
         }
       });
       if (attrMatches.length > 0) {
-        attrMatches.sort((a, b) => Math.abs(a.line - op.line) - Math.abs(b.line - op.line));
+        // Prefer callSiteLine (the parent component's usage line) for disambiguation
+        const targetLine = op.callSiteLine ?? op.line;
+        attrMatches.sort((a, b) => Math.abs(a.line - targetLine) - Math.abs(b.line - targetLine));
         attrMatches[0].attr.value = op.newText;
         return undefined;
       }

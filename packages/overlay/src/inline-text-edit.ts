@@ -414,12 +414,18 @@ function commitAndExit(options?: {
         newText,
         cursorOffset,
       };
+      // The call site is the parent frame in the stack that uses this component
+      const callSite = componentInfo.stack?.find(
+        f => f.componentName !== componentInfo.componentName && f.filePath
+      );
       const identity: ElementIdentity = {
         componentName: componentInfo.componentName,
         filePath: componentInfo.filePath || "",
         lineNumber: componentInfo.lineNumber || 0,
         columnNumber: componentInfo.columnNumber || 0,
         tagName: componentInfo.tagName,
+        callSiteLine: callSite?.lineNumber,
+        callSiteCol: callSite?.columnNumber,
       };
       addTextEditAnnotation(ann, identity, originalInnerHTML, {
         tagName: editingElement?.tagName.toLowerCase() || componentInfo.tagName,

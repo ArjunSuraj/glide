@@ -23,7 +23,18 @@ program
     try {
       const detection = await detect();
       const pkgPath = path.join(detection.projectRoot, "package.json");
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+
+      let pkg: Record<string, any>;
+      try {
+        pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      } catch {
+        logger.error(
+          chalk.red("  Error: ") +
+            chalk.white("No package.json found. Run this from your project root.\n")
+        );
+        process.exit(1);
+        return;
+      }
 
       pkg.scripts = pkg.scripts || {};
 
@@ -34,10 +45,13 @@ program
             chalk.dim(pkg.scripts.glide) +
             "\n"
         );
+        logger.info(
+          chalk.dim("  To reinitialize, remove the \"glide\" script from package.json and run init again.\n")
+        );
         return;
       }
 
-      const scriptCmd = `glide ${detection.port}`;
+      const scriptCmd = `glide-editor start ${detection.port}`;
       pkg.scripts.glide = scriptCmd;
 
       fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
@@ -57,9 +71,17 @@ program
           chalk.dim(` (${detection.framework}) on port ${detection.port}\n`)
       );
       logger.info(
-        chalk.dim("  Run ") +
+        chalk.dim("  Usage:\n")
+      );
+      logger.info(
+        chalk.dim("    1. Start your dev server: ") +
+          chalk.cyan("npm run dev") +
+          "\n"
+      );
+      logger.info(
+        chalk.dim("    2. In another terminal: ") +
           chalk.cyan("npm run glide") +
-          chalk.dim(" to start the visual editor.\n")
+          "\n"
       );
     } catch (err) {
       logger.error(
