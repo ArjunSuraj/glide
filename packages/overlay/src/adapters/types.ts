@@ -1,4 +1,4 @@
-import type { JSXStructuralPath } from "@react-rewrite/shared";
+import type { JSXStructuralPath } from "@glide-editor/shared";
 
 export interface ResolvedComponent {
   tagName: string;

@@ -1,4 +1,4 @@
-import type { PropertyDescriptor } from "@react-rewrite/shared";
+import type { PropertyDescriptor } from "@glide-editor/shared";
 
 // --- Layout SVG Icons (14x14) ---
 const S = 14; // icon size

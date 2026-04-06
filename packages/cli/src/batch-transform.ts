@@ -3,7 +3,7 @@
 // the original AST, applies all mutations atomically (parse once, write once).
 
 import * as fs from "node:fs";
-import type { BatchOperation } from "@react-rewrite/shared";
+import type { BatchOperation } from "@glide-editor/shared";
 import {
   parseSource,
   findJSXElementAt,

@@ -10,7 +10,7 @@ import type {
   UndoEntry,
   TransformErrorCode,
   TailwindTokenMap,
-} from "@react-rewrite/shared";
+} from "@glide-editor/shared";
 import { reorderComponent, getSiblings } from "./transform.js";
 import { updateClassName, updateTextContent } from "./transform.js";
 import { logger } from "./logger.js";

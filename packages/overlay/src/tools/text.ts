@@ -1,6 +1,6 @@
 // packages/overlay/src/tools/text.ts
 import type { ToolEventHandler } from "../interaction.js";
-import type { ComponentRef } from "@react-rewrite/shared";
+import type { ComponentRef } from "@glide-editor/shared";
 import { getToolOptions, addAnnotation, viewportToPage } from "../canvas-state.js";
 import { addTextAnnotation } from "../annotation-layer.js";
 import { resolveComponentAtPoint } from "./resolve-helper.js";

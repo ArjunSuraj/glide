@@ -1,6 +1,6 @@
 // packages/overlay/src/drag.ts
 import { getFiberFromHostInstance, isCompositeFiber, getDisplayName } from "bippy";
-import type { ComponentInfo, SiblingInfo } from "@react-rewrite/shared";
+import type { ComponentInfo, SiblingInfo } from "@glide-editor/shared";
 import { send, onMessage } from "./bridge.js";
 import { getDebugSource } from "./tools/resolve-helper.js";
 import { addPendingReorderOperation } from "./canvas-state.js";

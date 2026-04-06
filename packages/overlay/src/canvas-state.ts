@@ -3,7 +3,7 @@ import type {
   ToolType, Annotation, TextAnnotation, ColorOverride,
   ComponentRef, CanvasUndoAction,
   TextEditAnnotation, ElementIdentity, BatchOperation,
-} from "@react-rewrite/shared";
+} from "@glide-editor/shared";
 import type { MoveEntry, ParentLayout } from "./move-state.js";
 import { applyMoveTransform, clearMoveTransform, reacquireMovedElement } from "./move-state.js";
 import { getTokenMap } from "./properties/tailwind-resolver.js";

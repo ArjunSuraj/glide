@@ -1,4 +1,4 @@
-import type { ServerMessage, ComponentInfo, ElementIdentity, TextEditAnnotation } from "@react-rewrite/shared";
+import type { ServerMessage, ComponentInfo, ElementIdentity, TextEditAnnotation } from "@glide-editor/shared";
 import { getFiberFromHostInstance, isCompositeFiber, getDisplayName } from "bippy";
 import { getOwnerStack } from "bippy/source";
 import { resolveFrameFilePath } from "./utils/source-resolve.js";

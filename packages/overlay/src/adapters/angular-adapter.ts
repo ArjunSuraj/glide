@@ -1,4 +1,4 @@
-import type { JSXStructuralPath, JSXPathSegment } from "@react-rewrite/shared";
+import type { JSXStructuralPath, JSXPathSegment } from "@glide-editor/shared";
 import type { FrameworkAdapter, ResolvedComponent } from "./types.js";
 
 /**

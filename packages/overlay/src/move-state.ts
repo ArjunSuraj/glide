@@ -1,4 +1,4 @@
-import type { ComponentRef, ElementIdentity } from "@react-rewrite/shared";
+import type { ComponentRef, ElementIdentity } from "@glide-editor/shared";
 import { getFiberFromHostInstance, isCompositeFiber, getDisplayName } from "bippy";
 import { getOwnerStack, normalizeFileName, isSourceFile } from "bippy/source";
 import { SHADOWS } from "./design-tokens.js";

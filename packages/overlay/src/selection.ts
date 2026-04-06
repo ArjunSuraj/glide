@@ -15,7 +15,7 @@
 //     from clientX/clientY) against getBoundingClientRect() (viewport coords). Consistent.
 // Therefore, no viewportToPage/pageToViewport mapping is needed in this module.
 //
-import type { ComponentInfo, JSXStructuralPath } from "@react-rewrite/shared";
+import type { ComponentInfo, JSXStructuralPath } from "@glide-editor/shared";
 import { getShadowRoot, updateComponentDetail } from "./toolbar.js";
 import { isFullPageElement, isValidElement } from "./utils/component-filter.js";
 import { getElementsInArea } from "./utils/area-selection.js";

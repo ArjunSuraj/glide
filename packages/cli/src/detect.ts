@@ -1,7 +1,7 @@
 // packages/cli/src/detect.ts
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { DetectionResult, AppFramework } from "@react-rewrite/shared";
+import type { DetectionResult, AppFramework } from "@glide-editor/shared";
 
 export async function detect(cwd?: string): Promise<DetectionResult> {
   const projectRoot = cwd || process.cwd();
