@@ -1,6 +1,6 @@
 {
   "name": "glide-editor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Visual editor for web dev servers — select, edit text, move elements, reorder, duplicate, and apply changes directly to source. Works with React, Vue, and Angular.",
   "keywords": [
     "visual-editor",
