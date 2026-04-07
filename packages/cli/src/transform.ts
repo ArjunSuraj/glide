@@ -627,6 +627,21 @@ export function mutateTextContent(
       child.expression.value = newText;
       return true;
     }
+    // Handle ternary expressions: {condition ? "A" : "B"}
+    if (
+      child.type === "JSXExpressionContainer" &&
+      child.expression.type === "ConditionalExpression"
+    ) {
+      const cond = child.expression;
+      if ((cond.consequent.type === "StringLiteral" || cond.consequent.type === "Literal") && String(cond.consequent.value) === originalText) {
+        cond.consequent.value = newText;
+        return true;
+      }
+      if ((cond.alternate.type === "StringLiteral" || cond.alternate.type === "Literal") && String(cond.alternate.value) === originalText) {
+        cond.alternate.value = newText;
+        return true;
+      }
+    }
   }
 
   // Case 2: originalText is concatenated textContent from DOM (includes child element text).

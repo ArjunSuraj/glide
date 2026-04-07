@@ -91,11 +91,22 @@ describe("updateTextContent", () => {
     expect(result).toContain("Hello");
   });
 
-  it("handles ternary expressions by returning null", () => {
+  it("handles ternary expressions by updating the matching branch", () => {
     const source = `function App() {\n  return <span>{ok ? "Yes" : "No"}</span>;\n}`;
     const filePath = withTempFile(source);
     const result = updateTextContent(filePath, 2, 9, "Yes", "Sure");
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result).toContain('"Sure"');
+    expect(result).toContain('"No"');
+  });
+
+  it("handles ternary expressions alternate branch", () => {
+    const source = `function App() {\n  return <span>{ok ? "Yes" : "No"}</span>;\n}`;
+    const filePath = withTempFile(source);
+    const result = updateTextContent(filePath, 2, 9, "No", "Nope");
+    expect(result).not.toBeNull();
+    expect(result).toContain('"Yes"');
+    expect(result).toContain('"Nope"');
   });
 
   it("preserves boundary spaces when replacing text across nested elements", () => {
