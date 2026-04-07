@@ -33,8 +33,8 @@ import { initChangelog, destroyChangelog, addChangeEntry, isChangelogOpen, setCh
 
 declare global {
   interface Window {
-    __REACT_REWRITE_WS_PORT__?: number;
-    __REACT_REWRITE_APP_FRAMEWORK__?: string;
+    __GLIDE_WS_PORT__?: number;
+    __GLIDE_APP_FRAMEWORK__?: string;
   }
 }
 
@@ -181,7 +181,7 @@ function init(): void {
   // Only run in the top-level frame — skip iframes to avoid duplicate WS connections
   if (window !== window.top) return;
 
-  const wsPort = window.__REACT_REWRITE_WS_PORT__;
+  const wsPort = window.__GLIDE_WS_PORT__;
   if (!wsPort) {
     console.warn("[Glide] No WebSocket port found.");
     return;

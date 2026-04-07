@@ -10,11 +10,11 @@ let activeAdapter: FrameworkAdapter | null = null;
 /**
  * Detect the frontend framework at runtime and create the appropriate adapter.
  * Priority:
- * 1. Explicit framework hint from CLI (window.__REACT_REWRITE_APP_FRAMEWORK__)
+ * 1. Explicit framework hint from CLI (window.__GLIDE_APP_FRAMEWORK__)
  * 2. Runtime detection via global markers
  */
 export function createAdapter(): FrameworkAdapter {
-  const hint = (window as any).__REACT_REWRITE_APP_FRAMEWORK__ as string | undefined;
+  const hint = (window as any).__GLIDE_APP_FRAMEWORK__ as string | undefined;
 
   if (hint === "vue" || (!hint && isVueApp())) {
     activeAdapter = new VueAdapter();

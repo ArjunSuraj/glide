@@ -99,7 +99,7 @@ export function createProxyServer(
 
       const injectedScript = `
 <script src="/__glide/overlay.js"></script>
-<script>window.__REACT_REWRITE_WS_PORT__ = ${wsPort};window.__REACT_REWRITE_APP_FRAMEWORK__ = "${appFramework}";</script>`;
+<script>window.__GLIDE_WS_PORT__ = ${wsPort};window.__GLIDE_APP_FRAMEWORK__ = "${appFramework}";</script>`;
 
       if (body.includes("</body>")) {
         body = body.replace("</body>", `${injectedScript}\n</body>`);
