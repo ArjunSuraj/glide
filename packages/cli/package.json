@@ -1,6 +1,6 @@
 {
   "name": "glide-editor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Visual editor for web dev servers — select, edit text, move elements, reorder, duplicate, and apply changes directly to source. Works with React, Vue, and Angular.",
   "keywords": [
     "visual-editor",
@@ -16,11 +16,11 @@
     "cli",
     "tailwind"
   ],
-  "author": "AjayArjun",
-  "homepage": "https://github.com/AjayArjun/glide-editor",
+  "author": "Arjun Suraj",
+  "homepage": "https://github.com/ArjunSuraj/glide",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AjayArjun/glide-editor.git",
+    "url": "git+https://github.com/ArjunSuraj/glide.git",
     "directory": "packages/cli"
   },
   "engines": {
