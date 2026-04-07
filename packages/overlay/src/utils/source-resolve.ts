@@ -27,6 +27,11 @@ const BUNDLER_PREFIXES = [
 ];
 
 /**
+ * Match Windows drive-letter paths like "C:/" or "D:\" at the start of a string.
+ */
+const WINDOWS_DRIVE_RE = /^[A-Za-z]:[/\\]/;
+
+/**
  * Suffixes appended by bundlers that aren't part of the real path.
  */
 const BUNDLER_SUFFIXES = [
@@ -76,9 +81,14 @@ export function extractFilePath(rawFileName: string): string {
   // "/@fs/" we may get "/src/App.tsx"). Absolute filesystem paths from framework
   // runtime metadata (e.g. Vue's __file) must keep their leading "/" so the CLI
   // can resolve them correctly.
-  if (matchedBundlerPrefix && cleaned.startsWith("/") && !cleaned.startsWith("./")) {
+  // On Windows, file:///C:/project/src/App.tsx becomes "C:/project/src/App.tsx"
+  // after prefix stripping — don't strip the drive letter.
+  if (matchedBundlerPrefix && cleaned.startsWith("/") && !cleaned.startsWith("./") && !WINDOWS_DRIVE_RE.test(cleaned.slice(1))) {
     cleaned = cleaned.slice(1);
   }
+
+  // Normalize backslashes to forward slashes for consistent path handling
+  cleaned = cleaned.replace(/\\/g, "/");
 
   // Remove leading "./"
   if (cleaned.startsWith("./")) {
@@ -116,8 +126,8 @@ export function resolveFrameFilePath(rawFileName: string | undefined | null): st
     /\.(tsx?|jsx?|mjs|vue|html)$/.test(extracted) &&
     !extracted.includes("node_modules") &&
     !extracted.startsWith("../") &&            // traverses outside project
-    !extracted.includes("/dist/") &&           // built library output
-    !extracted.includes("/build/")             // built library output
+    !extracted.includes("/dist/") && !extracted.includes("\\dist\\") &&
+    !extracted.includes("/build/") && !extracted.includes("\\build\\")             // built library output
   ) {
     return extracted;
   }

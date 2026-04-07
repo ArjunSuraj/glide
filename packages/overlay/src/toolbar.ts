@@ -407,7 +407,7 @@ export function updateComponentDetail(info: {
   }
   componentDetailEl.className = "component-detail";
   const shortPath = info.filePath
-    ? info.filePath.replace(/^.*?\/src\//, "src/") + ":" + info.lineNumber
+    ? info.filePath.replace(/^.*?[/\\]src[/\\]/, "src/") + ":" + info.lineNumber
     : "";
   componentDetailEl.innerHTML = `<span class="tag">&lt;${info.tagName}&gt;</span><span class="name">${info.componentName}</span>${shortPath ? `<span class="path">${shortPath}</span>` : ""}`;
 }

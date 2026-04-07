@@ -1,31 +1,67 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
+const SOURCE_EXTENSIONS = new Set([".tsx", ".ts", ".jsx", ".js", ".vue", ".html"]);
+const EXCLUDED_DIRS = new Set(["node_modules", ".next", ".angular", "dist", ".git"]);
+
+/**
+ * Recursively walk a directory tree yielding file paths with source extensions.
+ * Pure Node.js — works on all platforms without external `grep`.
+ */
+function walkSourceFiles(dir: string): string[] {
+  const results: string[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return results;
+  }
+  for (const entry of entries) {
+    if (EXCLUDED_DIRS.has(entry.name)) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkSourceFiles(fullPath));
+    } else if (entry.isFile() && SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
 
 /**
  * Discover which source file defines a React component by name.
- * Greps the project asynchronously (won't block the event loop),
- * ranks results by definition likelihood,
- * follows re-exports in barrel files.
+ * Uses pure Node.js file system APIs instead of external `grep` for
+ * cross-platform compatibility (Windows, macOS, Linux).
+ * Ranks results by definition likelihood, follows re-exports in barrel files.
  */
 export async function discoverFile(
   componentName: string,
   projectRoot: string,
 ): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(
-      "grep",
-      ["-rn", componentName, "--include=*.tsx", "--include=*.ts", "--include=*.jsx", "--include=*.js", "--include=*.vue", "--include=*.html", "--exclude-dir=node_modules", "--exclude-dir=.next", "--exclude-dir=.angular", "--exclude-dir=dist", "."],
-      { cwd: projectRoot, timeout: 3000 },
-    );
-    const result = stdout.trim();
+    const files = walkSourceFiles(projectRoot);
+    const componentRe = new RegExp(componentName);
 
-    if (!result) return null;
+    interface Match {
+      relPath: string;
+      content: string;
+    }
 
-    const lines = result.split("\n").filter(Boolean);
+    const matches: Match[] = [];
+    for (const filePath of files) {
+      let content: string;
+      try {
+        content = fs.readFileSync(filePath, "utf-8");
+      } catch {
+        continue;
+      }
+      if (!componentRe.test(content)) continue;
+
+      const relPath = path.relative(projectRoot, filePath).split(path.sep).join("/");
+      matches.push({ relPath, content });
+    }
+
+    if (matches.length === 0) return null;
 
     const DEFINITION_PATTERNS = [
       new RegExp(`function\\s+${componentName}\\b`),
@@ -33,11 +69,8 @@ export async function discoverFile(
       new RegExp(`let\\s+${componentName}\\s*=`),
       new RegExp(`class\\s+${componentName}\\s`),
       new RegExp(`export\\s+default\\s+function\\s+${componentName}\\b`),
-      // Vue SFC: defineComponent with name
       new RegExp(`name:\\s*['"]${componentName}['"]`),
-      // Angular: @Component decorator class
       new RegExp(`class\\s+${componentName}Component\\b`),
-      // Angular selector match
       new RegExp(`selector:\\s*['"]app-${componentName.replace(/([A-Z])/g, (_, c) => "-" + c.toLowerCase()).replace(/^-/, "")}['"]`),
     ];
     const REEXPORT_PATTERN = new RegExp(
@@ -47,21 +80,16 @@ export async function discoverFile(
     const definitions: string[] = [];
     const reexports: string[] = [];
 
-    for (const line of lines) {
-      const parts = line.split(":");
-      let filePath = parts[0];
-      if (filePath.startsWith("./")) filePath = filePath.slice(2);
-      const content = parts.slice(2).join(":");
-
+    for (const { relPath, content } of matches) {
       if (DEFINITION_PATTERNS.some((p) => p.test(content))) {
-        definitions.push(filePath);
+        definitions.push(relPath);
       } else if (REEXPORT_PATTERN.test(content)) {
-        reexports.push(filePath);
+        reexports.push(relPath);
       }
     }
 
     const isBarrelFile = (f: string) =>
-      /\/index\.(ts|tsx|js|jsx)$/.test(f) || /^index\.(ts|tsx|js|jsx)$/.test(f);
+      /[/\\]index\.(ts|tsx|js|jsx)$/.test(f) || /^index\.(ts|tsx|js|jsx)$/.test(f);
 
     const realDefinitions = definitions.filter((f) => !isBarrelFile(f));
     if (realDefinitions.length > 0) {
@@ -71,7 +99,6 @@ export async function discoverFile(
       );
     }
 
-    // Follow re-exports from barrel files
     const barrelSources = [
       ...reexports,
       ...definitions.filter(isBarrelFile),
@@ -81,14 +108,10 @@ export async function discoverFile(
       if (resolved) return resolved;
     }
 
-    // Fallback: any non-barrel file mentioning the name
     const allFiles = [
       ...new Set(
-        lines
-          .map((l) => {
-            const f = l.split(":")[0];
-            return f.startsWith("./") ? f.slice(2) : f;
-          })
+        matches
+          .map((m) => m.relPath)
           .filter((f) => !isBarrelFile(f) && !f.includes("node_modules")),
       ),
     ];
@@ -99,7 +122,7 @@ export async function discoverFile(
       );
     }
   } catch {
-    // grep found nothing or failed
+    // search failed
   }
 
   return null;
@@ -125,12 +148,12 @@ function followReexport(
     for (const ext of [".tsx", ".ts", ".jsx", ".js", "/index.tsx", "/index.ts"]) {
       const candidate = path.resolve(barrelDir, importPath + ext);
       if (fs.existsSync(candidate)) {
-        return path.relative(projectRoot, candidate);
+        return path.relative(projectRoot, candidate).split(path.sep).join("/");
       }
     }
     const direct = path.resolve(barrelDir, importPath);
     if (fs.existsSync(direct)) {
-      return path.relative(projectRoot, direct);
+      return path.relative(projectRoot, direct).split(path.sep).join("/");
     }
   } catch {
     // barrel read failed
