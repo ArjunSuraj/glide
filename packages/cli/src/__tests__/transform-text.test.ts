@@ -109,6 +109,49 @@ describe("updateTextContent", () => {
     expect(result).toContain('"Nope"');
   });
 
+  it("handles nested ternary expressions", () => {
+    const source = `function App() {\n  return <span>{a ? "X" : b ? "Y" : "Z"}</span>;\n}`;
+    const filePath = withTempFile(source);
+    const result = updateTextContent(filePath, 2, 9, "Z", "W");
+    expect(result).not.toBeNull();
+    expect(result).toContain('"X"');
+    expect(result).toContain('"Y"');
+    expect(result).toContain('"W"');
+  });
+
+  it("handles logical AND with string literal", () => {
+    const source = `function App() {\n  return <span>{show && "Visible"}</span>;\n}`;
+    const filePath = withTempFile(source);
+    const result = updateTextContent(filePath, 2, 9, "Visible", "Shown");
+    expect(result).not.toBeNull();
+    expect(result).toContain('"Shown"');
+    expect(result).toContain("show");
+  });
+
+  it("handles logical OR with string fallback", () => {
+    const source = `function App() {\n  return <span>{x || "fallback"}</span>;\n}`;
+    const filePath = withTempFile(source);
+    const result = updateTextContent(filePath, 2, 9, "fallback", "default");
+    expect(result).not.toBeNull();
+    expect(result).toContain('"default"');
+  });
+
+  it("handles nullish coalescing with string default", () => {
+    const source = `function App() {\n  return <span>{x ?? "none"}</span>;\n}`;
+    const filePath = withTempFile(source);
+    const result = updateTextContent(filePath, 2, 9, "none", "empty");
+    expect(result).not.toBeNull();
+    expect(result).toContain('"empty"');
+  });
+
+  it("handles static template literal (no interpolations)", () => {
+    const source = "function App() {\n  return <span>{`Hello World`}</span>;\n}";
+    const filePath = withTempFile(source);
+    const result = updateTextContent(filePath, 2, 9, "Hello World", "Goodbye World");
+    expect(result).not.toBeNull();
+    expect(result).toContain("Goodbye World");
+  });
+
   it("preserves boundary spaces when replacing text across nested elements", () => {
     const source = `function App() {\n  return (\n    <p>\n      i study <strong>math</strong> at <strong>waterloo</strong>\n      and do <strong>software</strong> stuff.\n    </p>\n  );\n}`;
     const filePath = withTempFile(source);

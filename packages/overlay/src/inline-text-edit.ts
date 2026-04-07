@@ -31,6 +31,7 @@ let originalTextContent = "";
 let originalInnerHTML = "";
 let lastKnownText = "";
 let componentInfo: ComponentInfo | null = null;
+let componentInfoPromise: Promise<ComponentInfo | null> | null = null;
 let savedOutline = "";
 let unsubscribeMessage: (() => void) | null = null;
 
@@ -258,12 +259,14 @@ function enterEditMode(element: HTMLElement): void {
   const selectionInfo = getSelection();
   if (selectionInfo && selectionInfo.filePath) {
     componentInfo = selectionInfo;
+    componentInfoPromise = null;
   } else {
     componentInfo = null;
-    resolveComponent(element).then((info) => {
+    componentInfoPromise = resolveComponent(element).then((info) => {
       if (editingElement === element) {
         componentInfo = info;
       }
+      return info;
     });
   }
 
@@ -374,6 +377,70 @@ function getCaretOffsetWithin(element: HTMLElement): number | undefined {
   return prefix.toString().length;
 }
 
+function createTextAnnotation(
+  info: ComponentInfo,
+  origText: string,
+  newText: string,
+  cursorOff: number | undefined,
+  origHTML: string,
+  element: HTMLElement | null,
+): void {
+  if (!info.filePath && info.componentName) {
+    const cached = getCachedFilePath(info.componentName);
+    if (cached) {
+      info = { ...info, filePath: cached };
+    } else {
+      requestFileDiscovery(info.componentName).then((discovered) => {
+        if (discovered) setCachedFilePath(info.componentName, discovered);
+      });
+    }
+  }
+
+  const ann: TextEditAnnotation = {
+    type: "textEdit",
+    id: `text-edit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    componentName: info.componentName,
+    filePath: info.filePath || "",
+    lineNumber: info.lineNumber || 0,
+    columnNumber: info.columnNumber || 0,
+    originalText: origText,
+    newText,
+    cursorOffset: cursorOff,
+  };
+  const callSite = info.stack?.find(
+    f => f.componentName !== info.componentName && f.filePath
+  );
+  const identity: ElementIdentity = {
+    componentName: info.componentName,
+    filePath: info.filePath || "",
+    lineNumber: info.lineNumber || 0,
+    columnNumber: info.columnNumber || 0,
+    tagName: info.tagName,
+    callSiteLine: callSite?.lineNumber,
+    callSiteCol: callSite?.columnNumber,
+  };
+  addTextEditAnnotation(ann, identity, origHTML, {
+    tagName: element?.tagName.toLowerCase() || info.tagName,
+    className: element?.className || undefined,
+    parentTagName: element?.parentElement?.tagName.toLowerCase(),
+    parentClassName: element?.parentElement?.className || undefined,
+  }, element || undefined);
+  addChangeEntry({
+    type: "textAnnotation",
+    componentName: ann.componentName,
+    filePath: ann.filePath || "",
+    summary: `"${truncate(ann.originalText, 20)}" → "${truncate(ann.newText, 20)}"`,
+    state: "pending",
+    elementIdentity: identity,
+    revertData: {
+      type: "annotationRemove",
+      annotationId: ann.id,
+      originalInnerHTML: origHTML,
+      elementIdentity: identity,
+    },
+  });
+}
+
 function commitAndExit(options?: {
   nextSelection?: HTMLElement | null;
   clearSelection?: boolean;
@@ -387,67 +454,32 @@ function commitAndExit(options?: {
 
   console.log("[Glide:textEdit] commitAndExit changed:", changed, "componentInfo:", componentInfo?.componentName, "filePath:", componentInfo?.filePath);
 
-  if (changed && componentInfo) {
-    // If filePath is empty, try file discovery (grep-based lookup by component name)
-    if (!componentInfo.filePath && componentInfo.componentName) {
-      const cached = getCachedFilePath(componentInfo.componentName);
-      if (cached) {
-        componentInfo = { ...componentInfo, filePath: cached };
-      } else {
-        // Fire async discovery — won't block, annotation created with empty path for now
-        requestFileDiscovery(componentInfo.componentName).then((discovered) => {
-          if (discovered) setCachedFilePath(componentInfo!.componentName, discovered);
-        });
+  // If resolution is still in flight, wait for it then create the annotation
+  if (changed && !componentInfo && componentInfoPromise) {
+    const savedElement = editingElement;
+    const savedOriginalText = originalTextContent;
+    const savedOriginalHTML = originalInnerHTML;
+    const savedCursorOffset = cursorOffset;
+    const pending = componentInfoPromise;
+    componentInfoPromise = null;
+    exitEditMode();
+    pending.then((resolved) => {
+      if (resolved) {
+        createTextAnnotation(resolved, savedOriginalText, newText, savedCursorOffset, savedOriginalHTML, savedElement);
       }
+    });
+    if (options?.nextSelection && document.contains(options.nextSelection)) {
+      selectElement(options.nextSelection, { skipSidebar: false });
+    } else if (options?.clearSelection) {
+      clearSelection();
+    } else if (savedElement && document.contains(savedElement)) {
+      selectElement(savedElement, { skipSidebar: false });
     }
+    return;
+  }
 
-    // All text edits create annotations — committed via confirm button
-    {
-      const ann: TextEditAnnotation = {
-        type: "textEdit",
-        id: `text-edit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        componentName: componentInfo.componentName,
-        filePath: componentInfo.filePath || "",
-        lineNumber: componentInfo.lineNumber || 0,
-        columnNumber: componentInfo.columnNumber || 0,
-        originalText: originalTextContent,
-        newText,
-        cursorOffset,
-      };
-      // The call site is the parent frame in the stack that uses this component
-      const callSite = componentInfo.stack?.find(
-        f => f.componentName !== componentInfo.componentName && f.filePath
-      );
-      const identity: ElementIdentity = {
-        componentName: componentInfo.componentName,
-        filePath: componentInfo.filePath || "",
-        lineNumber: componentInfo.lineNumber || 0,
-        columnNumber: componentInfo.columnNumber || 0,
-        tagName: componentInfo.tagName,
-        callSiteLine: callSite?.lineNumber,
-        callSiteCol: callSite?.columnNumber,
-      };
-      addTextEditAnnotation(ann, identity, originalInnerHTML, {
-        tagName: editingElement?.tagName.toLowerCase() || componentInfo.tagName,
-        className: editingElement?.className || undefined,
-        parentTagName: editingElement?.parentElement?.tagName.toLowerCase(),
-        parentClassName: editingElement?.parentElement?.className || undefined,
-      }, editingElement || undefined);
-      addChangeEntry({
-        type: "textAnnotation",
-        componentName: ann.componentName,
-        filePath: ann.filePath || "",
-        summary: `"${truncate(ann.originalText, 20)}" → "${truncate(ann.newText, 20)}"`,
-        state: "pending",
-        elementIdentity: identity,
-        revertData: {
-          type: "annotationRemove",
-          annotationId: ann.id,
-          originalInnerHTML: originalInnerHTML,
-          elementIdentity: identity,
-        },
-      });
-    }
+  if (changed && componentInfo) {
+    createTextAnnotation(componentInfo, originalTextContent, newText, cursorOffset, originalInnerHTML, editingElement);
   }
 
   const elementToSelect = editingElement;
@@ -489,5 +521,6 @@ function exitEditMode(): void {
   originalInnerHTML = "";
   lastKnownText = "";
   componentInfo = null;
+  componentInfoPromise = null;
   savedOutline = "";
 }

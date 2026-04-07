@@ -192,18 +192,29 @@ function normalizeWs(s: string): string {
   return s.replace(/\s+/g, " ");
 }
 
+/** Recursively check if an expression node contains a string literal matching text. */
+function expressionContainsText(expr: any, text: string): boolean {
+  if (!expr) return false;
+  if ((expr.type === "StringLiteral" || expr.type === "Literal") && String(expr.value) === text) return true;
+  if (expr.type === "TemplateLiteral" && expr.expressions.length === 0 && expr.quasis.length === 1 && expr.quasis[0].value.cooked === text) return true;
+  if (expr.type === "ConditionalExpression") return expressionContainsText(expr.consequent, text) || expressionContainsText(expr.alternate, text);
+  if (expr.type === "LogicalExpression") return expressionContainsText(expr.left, text) || expressionContainsText(expr.right, text);
+  return false;
+}
+
 /** Check if a JSX element's text content (recursive) or attribute values contain the given text.
  *  Uses whitespace-normalized comparison because React collapses JSX whitespace
  *  (newlines → spaces) but the AST retains raw formatting. */
 function containsText(node: any, text: string): boolean {
   const normalized = normalizeWs(text.trim());
   if (!normalized) return false;
-  // Check children (text nodes and nested elements)
+  // Check children (text nodes, expression containers, and nested elements)
   const children = node.children;
   if (children) {
     for (const child of children) {
       if (child.type === "JSXText" && normalizeWs(child.value.trim()).includes(normalized)) return true;
       if (child.type === "JSXElement" && containsText(child, text)) return true;
+      if (child.type === "JSXExpressionContainer" && expressionContainsText(child.expression, normalized)) return true;
     }
   }
   // Check attribute string values (props like value="1")

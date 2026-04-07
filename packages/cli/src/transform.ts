@@ -560,6 +560,50 @@ export function updateClassName(
   return root.toSource({ quote: quoteStyle });
 }
 
+// ── Expression literal helpers ───────────────────────────────────────────
+
+function isStringLike(node: any): boolean {
+  return node.type === "StringLiteral" || node.type === "Literal";
+}
+
+/**
+ * Recursively search an expression AST node for a string literal matching
+ * originalText and replace it with newText. Handles:
+ * - Direct StringLiteral / Literal
+ * - ConditionalExpression (ternary), including nested ternaries
+ * - LogicalExpression (&&, ||, ??)
+ * - Static TemplateLiteral (zero interpolations)
+ */
+function mutateExpressionLiteral(expr: any, originalText: string, newText: string): boolean {
+  if (!expr) return false;
+
+  if (isStringLike(expr) && String(expr.value) === originalText) {
+    expr.value = newText;
+    return true;
+  }
+
+  if (expr.type === "TemplateLiteral" && expr.expressions.length === 0 && expr.quasis.length === 1) {
+    const quasi = expr.quasis[0];
+    if (quasi.value.cooked === originalText) {
+      quasi.value.cooked = newText;
+      quasi.value.raw = newText;
+      return true;
+    }
+  }
+
+  if (expr.type === "ConditionalExpression") {
+    if (mutateExpressionLiteral(expr.consequent, originalText, newText)) return true;
+    if (mutateExpressionLiteral(expr.alternate, originalText, newText)) return true;
+  }
+
+  if (expr.type === "LogicalExpression") {
+    if (mutateExpressionLiteral(expr.left, originalText, newText)) return true;
+    if (mutateExpressionLiteral(expr.right, originalText, newText)) return true;
+  }
+
+  return false;
+}
+
 // ── updateTextContent ────────────────────────────────────────────────────
 
 /**
@@ -571,7 +615,7 @@ export function updateClassName(
  * 1. Exact match: originalText matches a single JSXText child exactly
  * 2. Substring diff: originalText is the full concatenated textContent (includes child elements),
  *    we diff against newText to find what changed, then replace in the matching JSXText fragment
- * 3. Expression match: text is in a JSXExpressionContainer StringLiteral
+ * 3. Expression match: text is in a JSXExpressionContainer (StringLiteral, ternary, logical, template literal)
  */
 export function mutateTextContent(
   target: any,
@@ -627,20 +671,9 @@ export function mutateTextContent(
       child.expression.value = newText;
       return true;
     }
-    // Handle ternary expressions: {condition ? "A" : "B"}
-    if (
-      child.type === "JSXExpressionContainer" &&
-      child.expression.type === "ConditionalExpression"
-    ) {
-      const cond = child.expression;
-      if ((cond.consequent.type === "StringLiteral" || cond.consequent.type === "Literal") && String(cond.consequent.value) === originalText) {
-        cond.consequent.value = newText;
-        return true;
-      }
-      if ((cond.alternate.type === "StringLiteral" || cond.alternate.type === "Literal") && String(cond.alternate.value) === originalText) {
-        cond.alternate.value = newText;
-        return true;
-      }
+    if (child.type === "JSXExpressionContainer") {
+      const found = mutateExpressionLiteral(child.expression, originalText, newText);
+      if (found) return true;
     }
   }
 
@@ -739,9 +772,9 @@ function replaceInJSXTextRecursive(node: any, oldSub: string, newSub: string, de
         return true;
       }
     }
-    if (child.type === "JSXExpressionContainer" && child.expression?.type === "StringLiteral") {
-      if (child.expression.value.includes(oldSub)) {
-        child.expression.value = child.expression.value.replace(oldSub, newSub);
+    if (child.type === "JSXExpressionContainer" && (child.expression?.type === "StringLiteral" || child.expression?.type === "Literal")) {
+      if (String(child.expression.value).includes(oldSub)) {
+        child.expression.value = String(child.expression.value).replace(oldSub, newSub);
         return true;
       }
     }
